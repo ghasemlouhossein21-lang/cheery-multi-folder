@@ -405,41 +405,69 @@ async def log_order_to_channel(
     try:
         order_log_channel_id = bot_info.get("order_log_channel_id")
         if order_log_channel_id and str(order_log_channel_id) != "0":
-            # لاگ کانال باید همان Entityهای Premium/Custom Emoji ذخیره‌شده در
-            # قالب ادمین را مستقیماً به Telegram تحویل بدهد. مسیر عمومی send_rich
-            # در صورت ENTITY_TEXT_INVALID ممکن است برای ایمنی به متن ساده برگردد؛
-            # برای لاگ ابتدا Entity اصلی را ارسال می‌کنیم و فقط در صورت نامعتبر
-            # بودن offsetها، یک بار repair مخصوص Custom Emoji انجام می‌دهیم.
-            entities = text_entities_for_log
-            if entities:
-                normalized = _sanitize_entities_for_text(str(text), entities)
-                try:
-                    await bot.send_message(
-                        chat_id=order_log_channel_id,
-                        text=str(text),
-                        entities=normalized or None,
-                        parse_mode=None,
-                    )
-                except Exception as first_exc:
-                    repaired = await _repair_custom_emoji_entities(bot, str(text), entities)
-                    if repaired != normalized:
-                        try:
-                            await bot.send_message(
-                                chat_id=order_log_channel_id,
-                                text=str(text),
-                                entities=repaired or None,
-                                parse_mode=None,
-                            )
-                        except Exception:
-                            raise first_exc
-                    else:
-                        raise
-            else:
-                await bot.send_message(chat_id=order_log_channel_id, text=str(text), parse_mode=None)
+            await _send_order_log_message(bot, order_log_channel_id, str(text), text_entities_for_log, template_key)
         else:
             logger.warning("کانال لاگ سفارش تنظیم نشده است (order_log_channel_id=%r)", order_log_channel_id)
     except Exception:
-        logger.exception("ارسال لاگ سفارش به کانال اعتماد ناموفق بود")
+        logger.exception("ارسال لاگ سفارش به کانال/گروه اعتماد ناموفق بود")
+
+
+def _count_custom_emoji(entities) -> int:
+    n = 0
+    for e in entities or []:
+        typ = e.get("type") if isinstance(e, dict) else getattr(e, "type", None)
+        typ = getattr(typ, "value", typ)
+        if str(typ) == "custom_emoji":
+            n += 1
+    return n
+
+
+async def _send_order_log_message(bot, chat_id, text: str, entities, template_key: str):
+    """ارسال لاگ سفارش با Premium Emoji، همراه با تشخیص و fallback امن.
+
+    - اگر تلگرام entityها را رد کند، یک بار بعد از repair و در نهایت به‌صورت متن ساده
+      ارسال می‌شود تا لاگ هرگز گم نشود.
+    - بعد از ارسال، entityهای پیام برگشتی از تلگرام بررسی می‌شود. اگر custom_emoji ارسال
+      کرده باشیم ولی در پیام نهایی نباشد، دلیلش در لاگ ثبت می‌شود.
+    """
+    normalized = _sanitize_entities_for_text(text, entities) if entities else []
+    sent_custom = _count_custom_emoji(normalized)
+    logger.info("لاگ سفارش %s: %d entity (%d custom_emoji) به chat_id=%s ارسال می‌شود",
+                template_key, len(normalized), sent_custom, chat_id)
+    if entities and not normalized:
+        logger.warning("لاگ سفارش %s: همه‌ی entityها بعد از اعتبارسنجی حذف شدند (offset نامعتبر)", template_key)
+
+    attempts = []
+    if normalized:
+        attempts.append(normalized)
+        try:
+            repaired = await _repair_custom_emoji_entities(bot, text, entities)
+            if repaired and repaired != normalized:
+                attempts.append(repaired)
+        except Exception:
+            logger.exception("repair Premium Emoji لاگ سفارش ناموفق بود")
+
+    last_exc = None
+    for ents in attempts:
+        try:
+            msg = await bot.send_message(chat_id=chat_id, text=text, entities=ents or None, parse_mode=None)
+            got = _count_custom_emoji(getattr(msg, "entities", None))
+            if sent_custom and not got:
+                logger.warning(
+                    "لاگ سفارش %s: %d Premium Emoji فرستاده شد ولی تلگرام در پیام نهایی هیچ custom_emoji "
+                    "برنگرداند. یعنی تلگرام آن‌ها را برای این چت (chat_id=%s) نادیده گرفته است "
+                    "(نه اینکه کد entity را نفرستاده باشد).", template_key, sent_custom, chat_id)
+            else:
+                logger.info("لاگ سفارش %s ارسال شد؛ custom_emoji در پیام نهایی: %d", template_key, got)
+            return msg
+        except Exception as exc:
+            last_exc = exc
+            logger.warning("ارسال لاگ سفارش %s با entity ناموفق بود: %s", template_key, exc)
+
+    # آخرین راه: متن ساده، تا لاگ حتماً به گروه/کانال برسد.
+    if last_exc is not None:
+        logger.error("لاگ سفارش %s به‌صورت متن ساده (بدون Premium Emoji) ارسال شد. خطای اصلی: %s", template_key, last_exc)
+    return await bot.send_message(chat_id=chat_id, text=text, parse_mode=None)
 
 
 def _gregorian_to_jalali(gy: int, gm: int, gd: int) -> tuple[int, int, int]:
