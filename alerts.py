@@ -10,7 +10,7 @@ import logging
 
 import crypto
 import database as db
-from text_catalog import text as t, RichText
+from text_catalog import text as t
 from subscription import fetch_subscription_info, usage_bar, days_remaining, get_live_service_status, format_bytes
 from keyboards import back_button, fair_use_keyboard, service_alert_80_90_keyboard, service_expired_alert_keyboard
 import bot_info
@@ -350,56 +350,57 @@ async def log_order_to_channel(
     }
     text = t(template_key, **values)
 
-    # Premium Emojiهایی که از «ویرایش ایموجی پرمیوم» برای خودِ کلید متن
-    # ذخیره شده‌اند در button_custom_emoji_ids نگه‌داری می‌شوند، نه لزوماً
-    # داخل entities_json متن. مسیر قبلی فقط entities_json را برای لاگ می‌فرستاد؛
-    # بنابراین لاگ در گروه با ایموجی معمولی نمایش داده می‌شد.
-    # برای لاگ سفارش، همان Emoji ذخیره‌شده را روی اولین fallback emoji
-    # ابتدای قالب به‌صورت MessageEntity اعمال می‌کنیم.
-    existing_entities = list(getattr(text, "entities", None) or [])
-    if not any(str(e.get("type")) == "custom_emoji" for e in existing_entities):
-        try:
-            saved_emoji_id = db.get_button_custom_emoji_id(template_key)
-            if saved_emoji_id:
-                raw_text = str(text)
-                import unicodedata
-
-                def _is_emoji_char(ch: str) -> bool:
-                    cp = ord(ch)
-                    return (
-                        0x1F000 <= cp <= 0x1FAFF
-                        or 0x1FC00 <= cp <= 0x1FFFF
-                        or 0x2300 <= cp <= 0x23FF
-                        or 0x2600 <= cp <= 0x27BF
-                        or 0x2B00 <= cp <= 0x2BFF
-                        or unicodedata.category(ch) in {"So", "Sk"}
-                    )
-
-                start_py = next(
-                    (i for i, ch in enumerate(raw_text) if _is_emoji_char(ch)),
-                    None,
+    # سفارش‌ها مسیر جداگانه‌ای برای ارسال دارند. برای اطمینان از اینکه
+    # Premium Emoji تنظیم‌شده برای کلید order_log_* حتی اگر در entities_json
+    # قالب به‌علت جایگزینی متغیرها از دست رفته باشد، دوباره روی fallback صحیح
+    # خودش قرار بگیرد، ID ذخیره‌شده را از تنظیمات می‌خوانیم و alt واقعی آن را
+    # از Telegram می‌گیریم. Custom Emoji باید دقیقاً یک کاراکتر fallback معتبر
+    # را پوشش دهد؛ در غیر این صورت Telegram entity را نادیده می‌گیرد.
+    try:
+        saved_emoji_id = db.get_button_custom_emoji_id(template_key)
+        if saved_emoji_id:
+            raw_text = str(text)
+            entities = list(getattr(text, "entities", None) or [])
+            has_same_id = any(
+                str(e.get("type")) == "custom_emoji"
+                and str(e.get("custom_emoji_id")) == str(saved_emoji_id)
+                for e in entities
+                if isinstance(e, dict)
+            )
+            if not has_same_id:
+                stickers = await bot.get_custom_emoji_stickers(
+                    custom_emoji_ids=[str(saved_emoji_id)]
                 )
-                if start_py is not None:
-                    end_py = start_py + 1
-                    while end_py < len(raw_text):
-                        cp = ord(raw_text[end_py])
-                        if cp in (0xFE0E, 0xFE0F, 0x200D, 0x20E3) or 0x1F3FB <= cp <= 0x1F3FF:
-                            end_py += 1
-                        else:
-                            break
+                sticker = (stickers or [None])[0]
+                alt = getattr(sticker, "emoji", None) if sticker else None
 
-                    def _u16(value: str) -> int:
-                        return len(value.encode("utf-16-le")) // 2
-
-                    existing_entities.append({
-                        "type": "custom_emoji",
-                        "offset": _u16(raw_text[:start_py]),
-                        "length": _u16(raw_text[start_py:end_py]),
-                        "custom_emoji_id": str(saved_emoji_id),
-                    })
-                    text = RichText(raw_text, existing_entities)
-        except Exception:
-            logger.exception("اعمال Premium Emoji ذخیره‌شده روی لاگ سفارش ناموفق بود")
+                if alt:
+                    # پیدا کردن همان fallback در متن؛ نه «اولین ایموجی» به‌صورت
+                    # حدسی. این تفاوت مهم است چون قالب لاگ چندین ایموجی دارد.
+                    pos = raw_text.find(str(alt))
+                    if pos >= 0:
+                        offset = len(raw_text[:pos].encode("utf-16-le")) // 2
+                        length = len(str(alt).encode("utf-16-le")) // 2
+                        entities.append({
+                            "type": "custom_emoji",
+                            "offset": offset,
+                            "length": length,
+                            "custom_emoji_id": str(saved_emoji_id),
+                        })
+                        # RichText لازم نیست؛ خود send_message لیست entityها را
+                        # مستقیماً دریافت می‌کند.
+                        text_entities_for_log = entities
+                    else:
+                        text_entities_for_log = entities
+                else:
+                    text_entities_for_log = entities
+            else:
+                text_entities_for_log = entities
+        else:
+            text_entities_for_log = list(getattr(text, "entities", None) or [])
+    except Exception:
+        logger.exception("بازیابی Premium Emoji لاگ سفارش ناموفق بود")
+        text_entities_for_log = list(getattr(text, "entities", None) or [])
 
     try:
         order_log_channel_id = bot_info.get("order_log_channel_id")
@@ -409,7 +410,7 @@ async def log_order_to_channel(
             # در صورت ENTITY_TEXT_INVALID ممکن است برای ایمنی به متن ساده برگردد؛
             # برای لاگ ابتدا Entity اصلی را ارسال می‌کنیم و فقط در صورت نامعتبر
             # بودن offsetها، یک بار repair مخصوص Custom Emoji انجام می‌دهیم.
-            entities = getattr(text, "entities", None) or []
+            entities = text_entities_for_log
             if entities:
                 normalized = _sanitize_entities_for_text(str(text), entities)
                 try:
