@@ -10,7 +10,7 @@ import logging
 
 import crypto
 import database as db
-from text_catalog import text as t
+from text_catalog import text as t, RichText
 from subscription import fetch_subscription_info, usage_bar, days_remaining, get_live_service_status, format_bytes
 from keyboards import back_button, fair_use_keyboard, service_alert_80_90_keyboard, service_expired_alert_keyboard
 import bot_info
@@ -349,6 +349,58 @@ async def log_order_to_channel(
         "username": username or "-",
     }
     text = t(template_key, **values)
+
+    # Premium Emojiهایی که از «ویرایش ایموجی پرمیوم» برای خودِ کلید متن
+    # ذخیره شده‌اند در button_custom_emoji_ids نگه‌داری می‌شوند، نه لزوماً
+    # داخل entities_json متن. مسیر قبلی فقط entities_json را برای لاگ می‌فرستاد؛
+    # بنابراین لاگ در گروه با ایموجی معمولی نمایش داده می‌شد.
+    # برای لاگ سفارش، همان Emoji ذخیره‌شده را روی اولین fallback emoji
+    # ابتدای قالب به‌صورت MessageEntity اعمال می‌کنیم.
+    existing_entities = list(getattr(text, "entities", None) or [])
+    if not any(str(e.get("type")) == "custom_emoji" for e in existing_entities):
+        try:
+            saved_emoji_id = db.get_button_custom_emoji_id(template_key)
+            if saved_emoji_id:
+                raw_text = str(text)
+                import unicodedata
+
+                def _is_emoji_char(ch: str) -> bool:
+                    cp = ord(ch)
+                    return (
+                        0x1F000 <= cp <= 0x1FAFF
+                        or 0x1FC00 <= cp <= 0x1FFFF
+                        or 0x2300 <= cp <= 0x23FF
+                        or 0x2600 <= cp <= 0x27BF
+                        or 0x2B00 <= cp <= 0x2BFF
+                        or unicodedata.category(ch) in {"So", "Sk"}
+                    )
+
+                start_py = next(
+                    (i for i, ch in enumerate(raw_text) if _is_emoji_char(ch)),
+                    None,
+                )
+                if start_py is not None:
+                    end_py = start_py + 1
+                    while end_py < len(raw_text):
+                        cp = ord(raw_text[end_py])
+                        if cp in (0xFE0E, 0xFE0F, 0x200D, 0x20E3) or 0x1F3FB <= cp <= 0x1F3FF:
+                            end_py += 1
+                        else:
+                            break
+
+                    def _u16(value: str) -> int:
+                        return len(value.encode("utf-16-le")) // 2
+
+                    existing_entities.append({
+                        "type": "custom_emoji",
+                        "offset": _u16(raw_text[:start_py]),
+                        "length": _u16(raw_text[start_py:end_py]),
+                        "custom_emoji_id": str(saved_emoji_id),
+                    })
+                    text = RichText(raw_text, existing_entities)
+        except Exception:
+            logger.exception("اعمال Premium Emoji ذخیره‌شده روی لاگ سفارش ناموفق بود")
+
     try:
         order_log_channel_id = bot_info.get("order_log_channel_id")
         if order_log_channel_id and str(order_log_channel_id) != "0":
