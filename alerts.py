@@ -321,6 +321,7 @@ async def log_order_to_channel(
     expiry_text: str,
     renewal_details: str | None = None,
     payment_method: str | None = None,
+    panel_name: str | None = None,
 ):
     """ارسال لاگ سفارش با قالب‌های قابل ویرایش و پشتیبانی از Premium Emoji."""
     from utils import now_tehran
@@ -340,6 +341,7 @@ async def log_order_to_channel(
         "telegram_id": _mask_telegram_id(user.get("telegram_id")),
         "service_id": service_id or "-",
         "service_name": service_name or "-",
+        "panel_name": panel_name or "-",
         "package_name": package_text or "-",
         "amount": amount_text or "-",
         "expiry": expiry_text or "-",
