@@ -1240,6 +1240,11 @@ async def _log_fulfilled_order(
 
     payment_method = order.get("payment_method", "-") if order else "-"
 
+    panel_name = None
+    if panel_id:
+        panel_obj = db.get_vpn_panel(panel_id)
+        panel_name = (panel_obj or {}).get("name") or None
+
     await alerts.log_order_to_channel(
         bot,
         order_label=label,
@@ -1251,6 +1256,7 @@ async def _log_fulfilled_order(
         amount_text=amount_text,
         expiry_text=expiry_text,
         payment_method=payment_method,
+        panel_name=panel_name,
     )
 
     # گزارش ادمین از همین نقطه و فقط یک‌بار برای هر تحویل نهایی ارسال می‌شود
